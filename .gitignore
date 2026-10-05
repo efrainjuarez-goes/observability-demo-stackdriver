@@ -1,0 +1,13 @@
+# Credenciales y variables locales
+.env
+vars.sh
+*.json.key
+service-account*.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Generados
+alloy/config.generado.alloy
+alloy/bloque-productos.alloy

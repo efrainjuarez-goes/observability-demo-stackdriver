@@ -1,0 +1,146 @@
+// Configuracion de Grafana Alloy para exportar metricas de GCP
+// a Grafana Cloud como series de Prometheus.
+//
+// Las credenciales viven en /etc/default/alloy (chmod 600), nunca aqui.
+// Validar antes de arrancar:  sudo alloy fmt /etc/alloy/config.alloy
+
+// ---------------------------------------------------------------
+// 1. Exporter de GCP (el stackdriver exporter embebido en Alloy)
+//    Lee la API de Cloud Monitoring. La autenticacion no aparece
+//    aqui: usa Application Default Credentials, que toma del
+//    metadata server de la VM.
+// ---------------------------------------------------------------
+prometheus.exporter.gcp "gcp_demo" {
+  project_ids = [sys.env("GCP_PROJECT_A")]
+
+  // Cada prefijo extra = mas series devueltas por la API.
+  // Recortar al minimo que realmente se grafique.
+  metrics_prefixes = [
+    "loadbalancing.googleapis.com/https/request_count",
+    "loadbalancing.googleapis.com/https/total_latencies",
+    "loadbalancing.googleapis.com/https/backend_latencies",
+    "run.googleapis.com/request_count",
+    "run.googleapis.com/request_latencies",
+    "run.googleapis.com/container/cpu/utilizations",
+    "run.googleapis.com/container/memory/utilizations",
+    "run.googleapis.com/container/instance_count",
+    "cloudsql.googleapis.com/database/cpu/utilization",
+    "cloudsql.googleapis.com/database/memory/utilization",
+    "cloudsql.googleapis.com/database/network/connections",
+    "cloudsql.googleapis.com/database/disk/bytes_used",
+  ]
+
+  // Ventana de datos que se pide a GCP en cada scrape.
+  // Debe coincidir con scrape_interval: si se scrapea mas seguido,
+  // se pide el mismo rango varias veces sin obtener puntos nuevos.
+  request_interval = "2m"
+
+  // Compensa el retraso de ingesta de GCP; evita huecos.
+  ingest_delay = true
+}
+
+// ---------------------------------------------------------------
+// 2. Scrape del exporter
+// ---------------------------------------------------------------
+prometheus.scrape "gcp_demo" {
+  targets    = prometheus.exporter.gcp.gcp_demo.targets
+  forward_to = [prometheus.relabel.normaliza.receiver]
+
+  job_name        = "gcp-stackdriver"
+  scrape_interval = "2m"
+  scrape_timeout  = "60s"
+}
+
+// ---------------------------------------------------------------
+// 3. Normalizacion y etiquetado
+//    EL ORDEN IMPORTA: el renombrado va antes de la lista blanca,
+//    porque esa regla filtra por los nombres ya normalizados.
+// ---------------------------------------------------------------
+prometheus.relabel "normaliza" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+
+  // Guarda el nombre original para poder rastrear el origen
+  rule {
+    source_labels = ["__name__"]
+    target_label  = "metrica_gcp"
+  }
+
+  // Copia el project_id nativo (NO usar un valor estatico:
+  // con varios proyectos etiquetaria todo como si fuera uno)
+  rule {
+    source_labels = ["project_id"]
+    target_label  = "proyecto_gcp"
+  }
+
+  // Renombrado generico, sirve para cualquier tecnologia de GCP.
+  // stackdriver_cloud_run_revision_run_googleapis_com_request_count
+  //   -> gcp_run_request_count
+  rule {
+    source_labels = ["__name__"]
+    regex         = "stackdriver_.*?_([a-z0-9]+)_(?:googleapis_com|kubernetes_io)_(.+)"
+    target_label  = "__name__"
+    replacement   = "gcp_${1}_${2}"
+  }
+
+  rule {
+    target_label = "origen"
+    replacement  = "stackdriver-exporter"
+  }
+
+  rule {
+    target_label = "entorno"
+    replacement  = "demo"
+  }
+
+  // ---- Mapeo de producto: generar con scripts/gen-productos.sh ----
+  rule {
+    source_labels = ["project_id"]
+    regex         = "gcp-app-demo"
+    target_label  = "producto"
+    replacement   = "Central Services"
+  }
+  // ---- fin del bloque generado ----
+
+  // Catch-all: un proyecto ausente del CSV se marca en vez de
+  // perderse silenciosamente en los paneles que filtren por producto
+  rule {
+    source_labels = ["producto"]
+    regex         = ""
+    target_label  = "producto"
+    replacement   = "sin-mapear"
+  }
+
+  // Etiqueta sin valor analitico que infla cardinalidad
+  rule {
+    regex  = "unit"
+    action = "labeldrop"
+  }
+
+  // Lista blanca: solo lo que se va a graficar.
+  // Agregar aqui cualquier tecnologia nueva antes de reiniciar.
+  rule {
+    source_labels = ["__name__"]
+    regex         = "gcp_(run|loadbalancing|cloudsql)_.*"
+    action        = "keep"
+  }
+}
+
+// ---------------------------------------------------------------
+// 4. Envio a Grafana Cloud
+// ---------------------------------------------------------------
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GC_URL")
+
+    basic_auth {
+      username = sys.env("GC_USER")
+      password = sys.env("GC_TOKEN")
+    }
+
+    queue_config {
+      capacity             = 10000
+      max_shards           = 5
+      max_samples_per_send = 2000
+    }
+  }
+}

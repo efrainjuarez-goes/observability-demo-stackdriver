@@ -1,0 +1,6 @@
+project_id,producto,area,tecnologia
+gcp-app-demo,Central Services,tecnologia,gcp
+sgt-prod-4471,SIGES,salud,gcp
+sgt-qa-8832,SIGES,salud,gcp
+goes-prod-1123,GOES,gobierno,gcp
+tpns-prod-9087,TPNS,migracion,gcp
